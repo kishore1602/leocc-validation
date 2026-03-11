@@ -37,12 +37,6 @@ Output folder: final_static_traces/
             ├── bw_uplink.txt        ← from server UL pcap (receiver side)
             └── delay_uplink.txt     ← from client ICMP ping log 
 
-KNOWN BUG (carried forward from process_client_20260207.py):
-    delay_downlink.txt and delay_uplink.txt only have ~9076 lines instead
-    of expected 12000 lines because ping timeouts were not recorded in the
-    previous step. This causes the base RTT line to cut off halfway in the
-    delay graphs.
-
 """
 
 from pathlib import Path
