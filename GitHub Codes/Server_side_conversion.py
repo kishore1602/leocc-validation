@@ -29,12 +29,6 @@ Note:
     Bandwidth is always most accurately measured at the RECEIVER side because
     the receiver sees exactly how much data actually arrived after any losses.
 
-Pipeline position:
-    process_client_20260207.py    (Step 1a)
-    process_server_20260207.py  ← YOU ARE HERE (Step 1b)
-    combine_static_traces.py      (Step 2)
-    organize_static_for_replayer.py (Step 3)
-    extract_reconfiguration.py    (Step 4)
 """
 
 import os
