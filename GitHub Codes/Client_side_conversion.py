@@ -27,21 +27,6 @@ Output files (per trace folder) saved to converted_traces_client_20260207/:
     - delay_dl_oneway.txt       : Downlink one-way delay in ms (RTT / 2)
     - delay_ul_oneway.txt       : Uplink one-way delay in ms (RTT / 2)
 
-KNOWN BUG:
-    The extract_delay_oneway() function only processes ping lines that contain
-    'time=XX ms' pattern. When a ping times out, the line looks like:
-    'Request timeout for icmp_seq 45' — this line has no time= value and gets
-    silently skipped. This results in ~9076 lines instead of the expected 12000
-    lines (120 seconds x 100Hz). This causes the base RTT line to cut off
-    halfway in the delay graphs. This bug needs to be fixed by recording
-    timeout events as a high delay value (e.g. 999ms) instead of skipping them.
-
-Pipeline position:
-    process_client_20260207.py  ← YOU ARE HERE (Step 1a)
-    process_server_20260207.py    (Step 1b)
-    combine_static_traces.py      (Step 2)
-    organize_static_for_replayer.py (Step 3)
-    extract_reconfiguration.py    (Step 4)
 """
 
 import os
@@ -160,9 +145,6 @@ def extract_delay_oneway(icmp_file, output_file):
     ICMP pings were sent at 100Hz (every 10ms) during the field trip to
     measure the time-varying base RTT of the Starlink link.
 
-    Each ping log line looks like:
-        64 bytes from 98.97.x.x: icmp_seq=1 ttl=54 time=36.4 ms
-
     Process:
         1. Extract RTT value from 'time=XX.X ms' pattern using regex
         2. Divide RTT by 2 to get one-way delay
@@ -175,13 +157,6 @@ def extract_delay_oneway(icmp_file, output_file):
         19
         ...
 
-    KNOWN BUG:
-        When a ping times out, the line is:
-        'Request timeout for icmp_seq 45'
-        This line has no 'time=' value so it gets skipped entirely.
-        This means timeout events are not recorded, resulting in fewer
-        lines than expected (9076 instead of 12000 for 120s at 100Hz).
-        Fix: record timeout lines as high delay value (e.g. 999ms).
     """
     print(f"    ICMP: {os.path.basename(icmp_file)}...", end=" ", flush=True)
 
