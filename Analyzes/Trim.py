@@ -98,17 +98,42 @@ def get_pcap_time_range(pcap_file):
     return timestamps[0], timestamps[-1]
 
 
+def trim_pcap(pcap_file, output_file, start_epoch, end_epoch):
+    """
+    Trim pcap file to time window using editcap with Unix epoch timestamps.
+    Returns True if successful, False otherwise.
+    """
+    cmd = [
+        'editcap',
+        '-B', str(start_epoch),
+        '-A', str(end_epoch),
+        pcap_file,
+        output_file
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            print(f"    [WARN] editcap error: {result.stderr.strip()}")
+            return False
+        return True
+    except Exception as e:
+        print(f"    [WARN] editcap failed: {e}")
+        return False
+
 def trim_icmp_log(log_file, output_file, start_epoch, end_epoch):
     """
-    Trim ICMP ping log to the common time window.
-    Only keeps lines where the internal timestamp falls within [start, end].
-    Header and footer lines (Start time, End time, PING) are excluded.
+    Trim ICMP ping log to exact time window.
+    Only keeps lines where internal timestamp falls within [start_epoch, end_epoch].
+    Uses the exact first and last packet timestamps from the trimmed pcap
+    so both files start and end at exactly the same moment.
+
+    Returns (total_lines, kept_lines).
     """
     ts_pattern  = re.compile(r'\[(\d+\.\d+)\]')
     rtt_pattern = re.compile(r'time=([0-9.]+)\s*ms')
 
-    kept  = 0
     total = 0
+    kept  = 0
 
     with open(log_file, 'r') as f_in, open(output_file, 'w') as f_out:
         for line in f_in:
@@ -121,38 +146,6 @@ def trim_icmp_log(log_file, output_file, start_epoch, end_epoch):
                     kept += 1
 
     return total, kept
-
-
-def trim_pcap(pcap_file, output_file, start_epoch, end_epoch):
-    """
-    Trim pcap file to the common time window using editcap.
-    Uses -A (start time) and -B (end time) flags with epoch timestamps.
-
-    Args:
-        pcap_file   : Path to input pcap file
-        output_file : Path to output trimmed pcap file
-        start_epoch : Common window start time as epoch float
-        end_epoch   : Common window end time as epoch float
-
-    Returns:
-        True if successful, False otherwise
-    """
-    # Convert epoch float to editcap datetime format: YYYY-MM-DD HH:MM:SS.ffffff
-    from datetime import datetime, timezone
-    start_dt = datetime.fromtimestamp(start_epoch, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
-    end_dt   = datetime.fromtimestamp(end_epoch,   tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
-
-    cmd = ['editcap', '-A', start_dt, '-B', end_dt, pcap_file, output_file]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            print(f"    [WARN] editcap error: {result.stderr.strip()}")
-            return False
-        return True
-    except Exception as e:
-        print(f"    [WARN] editcap failed: {e}")
-        return False
-
 
 # ── MAIN PROCESSING FUNCTION ──────────────────────────────────────────────────
 
@@ -208,34 +201,51 @@ def process_trace(trace_id):
             print(f"    [WARN] Could not get time range")
             continue
 
-        print(f"    ICMP start : {icmp_start:.3f}  end : {icmp_end:.3f}  duration : {icmp_end - icmp_start:.2f}s")
-        print(f"    Pcap start : {pcap_start:.3f}  end : {pcap_end:.3f}  duration : {pcap_end - pcap_start:.2f}s")
+        print(f"    Raw ICMP : start={icmp_start:.3f}  end={icmp_end:.3f}  dur={icmp_end-icmp_start:.2f}s")
+        print(f"    Raw Pcap : start={pcap_start:.3f}  end={pcap_end:.3f}  dur={pcap_end-pcap_start:.2f}s")
 
-        # Find common window
-        common_start = max(icmp_start, pcap_start)
-        common_end   = min(icmp_end,   pcap_end)
-        common_dur   = common_end - common_start
+        # Step 2 — Find rough common window
+        rough_start = max(icmp_start, pcap_start)
+        rough_end   = min(icmp_end,   pcap_end)
 
-        print(f"    Common start : {common_start:.3f}")
-        print(f"    Common end   : {common_end:.3f}")
-        print(f"    Common dur   : {common_dur:.2f}s")
-
-        if common_dur <= 0:
+        if rough_end <= rough_start:
             print(f"    [ERROR] No common window found!")
             continue
 
-        # Trim ICMP log to common window
-        total, kept = trim_icmp_log(icmp_file, icmp_out, common_start, common_end)
-        print(f"    Total pings  : {total}")
-        print(f"    Kept pings   : {kept}")
-        print(f"    ICMP saved   : {icmp_out}")
+        # Step 3 — Trim pcap to rough common window
+        success = trim_pcap(pcap_file, pcap_out, rough_start, rough_end)
+        if not success:
+            print(f"    [ERROR] Pcap trimming failed")
+            continue
 
-        # Trim pcap to common window using editcap
-        success = trim_pcap(pcap_file, pcap_out, common_start, common_end)
-        if success:
-            print(f"    Pcap saved   : {pcap_out}")
-        else:
-            print(f"    [WARN] Pcap trimming failed for {pcap_file}")
+        # Step 4 — Read exact timestamps from trimmed pcap
+        # These are the ground truth start and end for both files
+        exact_start, exact_end = get_pcap_time_range(pcap_out)
+        if None in (exact_start, exact_end):
+            print(f"    [ERROR] Could not read trimmed pcap timestamps")
+            continue
+
+        print(f"    Exact window : start={exact_start:.6f}  end={exact_end:.6f}  dur={exact_end-exact_start:.2f}s")
+
+        # Step 5 — Trim ICMP log using exact pcap timestamps
+        total, kept = trim_icmp_log(icmp_file, icmp_out, exact_start, exact_end)
+
+        print(f"    ICMP pings   : total={total}  kept={kept}")
+
+        # Step 6 — Verify alignment by checking trimmed ICMP timestamps
+        icmp_trim_start, icmp_trim_end = get_icmp_time_range(icmp_out)
+
+        if icmp_trim_start and icmp_trim_end:
+            start_diff = abs(icmp_trim_start - exact_start) * 1000
+            end_diff   = abs(icmp_trim_end   - exact_end)   * 1000
+            print(f"    Alignment check:")
+            print(f"      Pcap  start={exact_start:.6f}  end={exact_end:.6f}")
+            print(f"      ICMP  start={icmp_trim_start:.6f}  end={icmp_trim_end:.6f}")
+            print(f"      Start diff={start_diff:.2f}ms  End diff={end_diff:.2f}ms")
+
+        print(f"    Saved ICMP : {icmp_out}")
+        print(f"    Saved Pcap : {pcap_out}")
+
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -244,5 +254,5 @@ if __name__ == "__main__":
     os.makedirs(OUTPUT_BASE, exist_ok=True)
     print(f"Output directory: {OUTPUT_BASE}")
 
-for trace_id in TRACES:
-    process_trace(trace_id)
+    for trace_id in TRACES:
+        process_trace(trace_id)
