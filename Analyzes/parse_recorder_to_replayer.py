@@ -113,7 +113,7 @@ def parse_ping_to_delay(ping_file: str, output_file: str,
             avg_rtt      = sum(interval_rtts[i]) / len(interval_rtts[i])
             one_way_delay = int(round(avg_rtt / 2))
         else:
-            # Empty slot — carry forward last known RTT value (Sizhe's suggestion)
+            # Empty slot — carry forward last known RTT value
             # mm-loss shell already handles packet loss simulation
             one_way_delay = delays[-1] if delays else default_delay_ms
         delays.append(one_way_delay)
