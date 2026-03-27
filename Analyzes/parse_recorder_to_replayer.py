@@ -7,7 +7,7 @@ Convert LeoRecorder outputs to LeoReplayer trace format.
 This script converts raw pcap and ping data from the field trip recorder
 into the bandwidth and delay trace files used by LeoReplayer.
 
-Changes from original (based on Sizhe's suggestions):
+Changes from original:
     1. Use math.floor() for slot assignment — receive timestamp floored to
        nearest 10ms boundary. RTT at 16ms → slot 1 (0-10ms), 22ms → slot 2 etc.
     2. Multiple pings in same slot → averaged into one value
@@ -55,7 +55,7 @@ def parse_ping_to_delay(ping_file: str, output_file: str,
     """
     Convert ping RTT output to delay trace format.
 
-    Slot assignment (Sizhe's suggestion):
+    Slot assignment:
         - Use math.floor() on receive timestamp to assign to 10ms slot
         - RTT at 16ms → floor(16/10) = slot 1 (0-10ms)
         - RTT at 22ms → floor(22/10) = slot 2 (10-20ms)
