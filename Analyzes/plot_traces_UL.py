@@ -1,25 +1,11 @@
 #!/usr/bin/env python3
 """
-plot_all_traces_uplink.py - LeoCC All 9 Traces Uplink Performance Graphs
-=========================================================================
-Plots 4-subplot performance graph for all 9 uplink traces.
-Runs for both min_rtt_fluctuation=5000 and min_rtt_fluctuation=20000.
+plot_all_traces_interpolation_3600000ms.py
+==========================================
+Plots 4-subplot performance graph for all 9 uplink traces
+using interpolation delay traces with 3600000ms fill value.
 
-Subplots:
-    Row 1: Throughput over time (all CCAs vs trace capacity) at 500ms granularity
-    Row 2: Cubic packet delay scatter + base RTT scatter
-    Row 3: BBR packet delay scatter + base RTT scatter
-    Row 4: LeoCC packet delay scatter + base RTT scatter
-
-Sources:
-    Capacity    : bw_uplink.txt (mahimahi packet timestamps)
-    Throughput  : receiver-side pcap (n2) via tshark frame.len at 500ms granularity
-    Base RTT    : icmp_ul_trimmed.log (raw ICMP ping log, actual timestamps)
-    Packet delay: TCP timestamp matching between sender (n1) and receiver (n2) pcaps
-
-Uplink direction: n1 sends → n2 receives
-
-Output: saved to ~/graphs/static_final/
+Output: saved to ~/graphs/static_interpolation_3600000ms/
 """
 
 import os
@@ -32,14 +18,13 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
-BASE      = os.path.expanduser("~/zach/LeoCC/LeoCC/leoreplayer/replayer/static_traces_20260207")
+BASE      = os.path.expanduser("~/zach/LeoCC/LeoCC/leoreplayer/replayer/static_traces_interpolation")
 ICMP_BASE = "/mnt/nuwinslab_nas/nuwins_data_platform/datasets/bos_phi_trip_202601/trimmed_traces_20260207"
-OUT       = os.path.expanduser("~/graphs/static_final")
+OUT       = os.path.expanduser("~/graphs/static_interpolation_3600000ms")
 os.makedirs(OUT, exist_ok=True)
 
-DURATION = 120  # seconds
+DURATION = 120
 
-# Per-trace reconfiguration offsets computed from raw ICMP cluster analysis
 TRACES = {
     "1770506564594-0500": 0.860,
     "1770506824350-0500": 10.117,
@@ -52,19 +37,15 @@ TRACES = {
     "1770509718695-0500": 3.052,
 }
 
-# min_rtt_fluctuation values to plot
-MIN_RTT_VALUES = [5000, 20000]
-
-# CCA config: (key, results_folder, label, color, linestyle)
 CCAS = [
-    ("cubic",  "results_cubic",  "Cubic", "red",    "--"),
-    ("bbr",    "results_bbr",    "BBR",   "green",  "--"),
+    ("cubic",  "results_cubic",  "Cubic",         "red",    "--"),
+    ("bbr",    "results_bbr",    "BBR",           "green",  "--"),
+    ("leocc",  "results_leocc",  "LeoCC (10000)", "purple", ":"),
 ]
 
 # ── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
 
 def rtt_from_icmp_log(log_path, duration=DURATION):
-    """Parse raw ICMP ping log and return all individual ping points."""
     if not os.path.exists(log_path):
         print(f"  WARNING: ICMP log not found: {log_path}")
         return np.array([]), np.array([])
@@ -82,7 +63,6 @@ def rtt_from_icmp_log(log_path, duration=DURATION):
                     rtts_raw.append(float(rtt_match.group(1)))
 
         if not times_raw:
-            print("  WARNING: No valid lines parsed from ICMP log")
             return np.array([]), np.array([])
 
         t0 = times_raw[0]
@@ -93,9 +73,7 @@ def rtt_from_icmp_log(log_path, duration=DURATION):
                 times_out.append(rel)
                 rtts_out.append(r)
 
-        print(f"  Base RTT: parsed {len(times_raw)} pings, "
-              f"{len(times_out)} within duration, "
-              f"avg={np.mean(rtts_out):.1f} ms")
+        print(f"  Base RTT: parsed {len(times_raw)} pings, avg={np.mean(rtts_out):.1f} ms")
         return np.array(times_out), np.array(rtts_out)
     except Exception as e:
         print(f"  ERROR parsing ICMP log: {e}")
@@ -103,9 +81,7 @@ def rtt_from_icmp_log(log_path, duration=DURATION):
 
 
 def capacity_from_bw(bw_path, duration=DURATION):
-    """Convert mahimahi packet timestamp file to per-500ms Mbps."""
     if not os.path.exists(bw_path):
-        print(f"  WARNING: BW file not found: {bw_path}")
         return np.zeros(duration * 2), np.arange(duration * 2) / 2
     try:
         with open(bw_path) as f:
@@ -115,7 +91,7 @@ def capacity_from_bw(bw_path, duration=DURATION):
         t0   = times[0]
         bins = defaultdict(int)
         for t in times:
-            slot = int((t - t0) / 500)  # 500ms slots
+            slot = int((t - t0) / 500)
             if 0 <= slot < duration * 2:
                 bins[slot] += 12000
         cap = np.array([bins.get(s, 0) / 1e6 / 0.5 for s in range(duration * 2)])
@@ -127,7 +103,6 @@ def capacity_from_bw(bw_path, duration=DURATION):
 
 
 def throughput_from_pcap(pcap_path, duration=DURATION):
-    """Compute per-500ms throughput (Mbps) from receiver-side pcap using tshark."""
     if not os.path.exists(pcap_path):
         print(f"    WARNING: pcap not found: {pcap_path}")
         return np.zeros(duration * 2)
@@ -142,7 +117,7 @@ def throughput_from_pcap(pcap_path, duration=DURATION):
             parts = line.strip().split()
             if len(parts) == 2:
                 try:
-                    slot = int(float(parts[0]) * 2)  # 500ms slots
+                    slot = int(float(parts[0]) * 2)
                     if 0 <= slot < duration * 2:
                         bins[slot] += int(parts[1])
                 except ValueError:
@@ -154,7 +129,6 @@ def throughput_from_pcap(pcap_path, duration=DURATION):
 
 
 def extract_ts_map(pcap_path):
-    """Extract TCP timestamp option values and epoch times from pcap."""
     if not os.path.exists(pcap_path):
         return {}
     try:
@@ -181,7 +155,6 @@ def extract_ts_map(pcap_path):
 
 
 def compute_packet_delay(sender_pcap, receiver_pcap, duration=DURATION):
-    """Compute per-packet one-way delay (ms) by matching TCP timestamp values."""
     print(f"    Extracting TS from sender:   {os.path.basename(sender_pcap)}")
     sender_map   = extract_ts_map(sender_pcap)
     print(f"    Extracting TS from receiver: {os.path.basename(receiver_pcap)}")
@@ -202,9 +175,9 @@ def compute_packet_delay(sender_pcap, receiver_pcap, duration=DURATION):
 
 # ── MAIN PLOT FUNCTION ────────────────────────────────────────────────────────
 
-def plot_trace(trace_id, ul_offset, min_rtt):
+def plot_trace(trace_id, ul_offset):
     print(f"\n{'='*60}")
-    print(f"Plotting {trace_id} [uplink] min_rtt={min_rtt}")
+    print(f"Plotting {trace_id} [uplink interpolation 3600000ms]")
 
     tdir      = os.path.join(BASE, trace_id, "uplink")
     bw_path   = os.path.join(tdir, "bw_uplink.txt")
@@ -216,13 +189,8 @@ def plot_trace(trace_id, ul_offset, min_rtt):
     cap, t_cap = capacity_from_bw(bw_path)
     t_rtt, rtt = rtt_from_icmp_log(icmp_path)
 
-    # Build CCA list dynamically based on min_rtt value
-    ccas = CCAS + [
-        ("leocc", f"results_leocc_{min_rtt}", f"LeoCC ({min_rtt})", "purple", ":"),
-    ]
-
     cca_data = {}
-    for cca_key, results_folder, label, color, ls in ccas:
+    for cca_key, results_folder, label, color, ls in CCAS:
         results_dir = os.path.join(tdir, results_folder)
         tput_path   = os.path.join(results_dir, "n2.pcap")
         send_path   = os.path.join(results_dir, "n1.pcap")
@@ -239,14 +207,12 @@ def plot_trace(trace_id, ul_offset, min_rtt):
             "tput": tput, "delay_t": dt, "delay_d": dd
         }
 
-    # ── FIGURE: 4 subplots ──
     fig, axes = plt.subplots(4, 1, figsize=(14, 16), sharex=True)
     fig.suptitle(
-        f"Uplink Performance – Trace {trace_id} (min_rtt_fluctuation={min_rtt})",
+        f"Uplink Performance – Trace {trace_id} (3600000ms Interpolation)",
         fontsize=13, fontweight='bold'
     )
 
-    # Row 1: Throughput at 500ms granularity
     ax1 = axes[0]
     ax1.plot(t_cap, cap, color='blue', lw=2.0, label='Trace Capacity')
     for cca_key, d in cca_data.items():
@@ -260,7 +226,6 @@ def plot_trace(trace_id, ul_offset, min_rtt):
     ax1.set_ylim(bottom=0)
     ax1.grid(True, alpha=0.3)
 
-    # Rows 2-4: Per-packet delay scatter + base RTT scatter
     for ax, (cca_key, d) in zip(axes[1:], cca_data.items()):
         if len(d["delay_t"]) > 0:
             ax.scatter(d["delay_t"], d["delay_d"],
@@ -282,7 +247,7 @@ def plot_trace(trace_id, ul_offset, min_rtt):
     axes[-1].set_xlim(0, DURATION)
 
     plt.tight_layout()
-    out_path = os.path.join(OUT, f"{trace_id}_uplink_minrtt{min_rtt}.png")
+    out_path = os.path.join(OUT, f"{trace_id}_uplink_interpolation_3600000ms.png")
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"\n  Saved: {out_path}")
@@ -291,6 +256,5 @@ def plot_trace(trace_id, ul_offset, min_rtt):
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     for trace_id, ul_offset in TRACES.items():
-        for min_rtt in MIN_RTT_VALUES:
-            plot_trace(trace_id, ul_offset, min_rtt)
-    print("\nAll plots done! Check ~/graphs/static_final/")
+        plot_trace(trace_id, ul_offset)
+    print("\nAll plots done! Check ~/graphs/static_interpolation_3600000ms/")
