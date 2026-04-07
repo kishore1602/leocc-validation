@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-cdf_plot_uplink.py
-==================
+cdf_plot_interpolation_3600000ms.py
+=====================================
 Plots CDF of throughput and one-way delay across all 9 static uplink traces
-for 4 CCAs: Cubic, BBR, LeoCC_20000, LeoCC_5000.
+for 3 CCAs: Cubic, BBR, LeoCC (min_rtt_fluctuation=10000, 3600000ms fill value).
 
 Each data point = per-500ms throughput sample or per-packet delay sample
 
-Output: cdf_uplink.png saved to ~/graphs/
+Output: cdf_interpolation_3600000ms.png saved to ~/graphs/
 """
 
 import os
-import re
 import subprocess
 import numpy as np
 import matplotlib
@@ -20,7 +19,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-BASE = os.path.expanduser("~/zach/LeoCC/LeoCC/leoreplayer/replayer/static_traces_20260207")
+BASE = os.path.expanduser("~/zach/LeoCC/LeoCC/leoreplayer/replayer/static_traces_interpolation")
 OUT  = os.path.expanduser("~/graphs")
 os.makedirs(OUT, exist_ok=True)
 
@@ -36,20 +35,17 @@ TRACES = [
     "1770509718695-0500",
 ]
 
-DURATION = 120  # seconds
+DURATION = 120
 
-# CCA config: (key, results_folder, label, color)
 CCAS = [
-    ("cubic",       "results_cubic",       "Cubic",        "red"),
-    ("bbr",         "results_bbr",         "BBR",          "green"),
-    ("leocc_20000", "results_leocc_20000", "LeoCC (20000)", "blue"),
-    ("leocc_5000",  "results_leocc_5000",  "LeoCC (5000)",  "purple"),
+    ("cubic",  "results_cubic",  "Cubic",         "red"),
+    ("bbr",    "results_bbr",    "BBR",           "green"),
+    ("leocc",  "results_leocc",  "LeoCC (10000)", "purple"),
 ]
 
 # ── HELPER FUNCTIONS ──────────────────────────────────────────────────────────
 
 def throughput_from_pcap(pcap_path, duration=DURATION):
-    """Compute per-500ms throughput samples from receiver pcap."""
     if not os.path.exists(pcap_path):
         print(f"    WARNING: pcap not found: {pcap_path}")
         return []
@@ -64,14 +60,12 @@ def throughput_from_pcap(pcap_path, duration=DURATION):
             parts = line.strip().split()
             if len(parts) == 2:
                 try:
-                    slot = int(float(parts[0]) * 2)  # 500ms slots
+                    slot = int(float(parts[0]) * 2)
                     if 0 <= slot < duration * 2:
                         bins[slot] += int(parts[1])
                 except ValueError:
                     continue
-        # Convert to Mbps per 500ms slot
         samples = [bins.get(s, 0) * 8 / 1e6 / 0.5 for s in range(duration * 2)]
-        # Filter out zero slots
         samples = [s for s in samples if s > 0]
         return samples
     except Exception as e:
@@ -80,7 +74,6 @@ def throughput_from_pcap(pcap_path, duration=DURATION):
 
 
 def extract_ts_map(pcap_path):
-    """Extract TCP timestamp option values and epoch times from pcap."""
     if not os.path.exists(pcap_path):
         return {}
     try:
@@ -107,7 +100,6 @@ def extract_ts_map(pcap_path):
 
 
 def delay_from_pcaps(sender_pcap, receiver_pcap, duration=DURATION):
-    """Compute per-packet one-way delay samples from sender/receiver pcaps."""
     if not os.path.exists(sender_pcap) or not os.path.exists(receiver_pcap):
         print(f"    WARNING: pcap not found")
         return []
@@ -118,7 +110,7 @@ def delay_from_pcaps(sender_pcap, receiver_pcap, duration=DURATION):
     for ts_val, recv_time in receiver_map.items():
         if ts_val in sender_map:
             delay_ms = (recv_time - sender_map[ts_val]) * 1000
-            if 0 <= delay_ms <= 2000:
+            if 0 <= delay_ms <= 150:
                 rel = recv_time - t0
                 if 0 <= rel <= duration:
                     delays.append(delay_ms)
@@ -127,7 +119,6 @@ def delay_from_pcaps(sender_pcap, receiver_pcap, duration=DURATION):
 
 # ── COLLECT DATA ──────────────────────────────────────────────────────────────
 
-# Store all throughput and delay samples per CCA
 all_tput  = {cca_key: [] for cca_key, _, _, _ in CCAS}
 all_delay = {cca_key: [] for cca_key, _, _, _ in CCAS}
 
@@ -137,19 +128,17 @@ for trace_id in TRACES:
     tdir = os.path.join(BASE, trace_id, "uplink")
 
     for cca_key, results_folder, label, color in CCAS:
-        results_dir  = os.path.join(tdir, results_folder)
-        tput_pcap    = os.path.join(results_dir, "n2.pcap")
-        sender_pcap  = os.path.join(results_dir, "n1.pcap")
-        receiver_pcap= os.path.join(results_dir, "n2.pcap")
+        results_dir   = os.path.join(tdir, results_folder)
+        tput_pcap     = os.path.join(results_dir, "n2.pcap")
+        sender_pcap   = os.path.join(results_dir, "n1.pcap")
+        receiver_pcap = os.path.join(results_dir, "n2.pcap")
 
         print(f"  [{label}]")
 
-        # Throughput
         tput_samples = throughput_from_pcap(tput_pcap)
         all_tput[cca_key].extend(tput_samples)
         print(f"    Throughput samples: {len(tput_samples)}  avg={np.mean(tput_samples):.1f} Mbps" if tput_samples else "    No throughput data")
 
-        # Delay
         delay_samples = delay_from_pcaps(sender_pcap, receiver_pcap)
         all_delay[cca_key].extend(delay_samples)
         print(f"    Delay samples: {len(delay_samples)}  avg={np.mean(delay_samples):.1f} ms" if delay_samples else "    No delay data")
@@ -157,9 +146,9 @@ for trace_id in TRACES:
 # ── PLOT CDF ──────────────────────────────────────────────────────────────────
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-fig.suptitle("CDF of Throughput and One-Way Delay — All 9 Uplink Traces", fontsize=13, fontweight='bold')
+fig.suptitle("CDF of Throughput and One-Way Delay — All 9 Uplink Traces (3600000ms Interpolation)",
+             fontsize=13, fontweight='bold')
 
-# Plot 1 — CDF of Throughput
 ax1 = axes[0]
 for cca_key, _, label, color in CCAS:
     data = sorted(all_tput[cca_key])
@@ -174,7 +163,6 @@ ax1.grid(True, alpha=0.3)
 ax1.set_xlim(left=0)
 ax1.set_ylim(0, 1)
 
-# Plot 2 — CDF of One-Way Delay
 ax2 = axes[1]
 for cca_key, _, label, color in CCAS:
     data = sorted(all_delay[cca_key])
@@ -190,7 +178,7 @@ ax2.set_xlim(0, 200)
 ax2.set_ylim(0, 1)
 
 plt.tight_layout()
-out_path = os.path.join(OUT, "cdf_uplink.png")
+out_path = os.path.join(OUT, "cdf_interpolation_3600000ms.png")
 plt.savefig(out_path, dpi=150, bbox_inches='tight')
 plt.close()
 print(f"\nSaved: {out_path}")

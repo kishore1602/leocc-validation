@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-scatter_box_plot_uplink.py
-==========================
+scatter_box_plot_interpolation.py
+==================================
 Plots throughput vs one-way delay box plot across all 9 static uplink traces
-for 4 CCAs: Cubic, BBR, LeoCC_20000, LeoCC_5000.
+for 3 CCAs: Cubic, BBR, LeoCC (min_rtt_fluctuation=10000, interpolation delay).
 
-Follows Figure style:
+Follows paper Figure 10 style:
     - Box: 25th-75th percentile
     - Whiskers: 5th-95th percentile (dotted lines)
     - Center point: median intersection
     - "Better" arrow in upper left
+    - No individual scatter dots
 
-Output: scatter_box_uplink.png saved to ~/graphs/
+Output: scatter_box_interpolation.png saved to ~/graphs/
 """
 
 import os
@@ -24,7 +25,7 @@ import matplotlib.patches as mpatches
 from collections import defaultdict
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-BASE = os.path.expanduser("~/zach/LeoCC/LeoCC/leoreplayer/replayer/static_traces_20260207")
+BASE = os.path.expanduser("~/zach/LeoCC/LeoCC/leoreplayer/replayer/static_traces_interpolation")
 OUT  = os.path.expanduser("~/graphs")
 os.makedirs(OUT, exist_ok=True)
 
@@ -43,10 +44,9 @@ TRACES = [
 DURATION = 120
 
 CCAS = [
-    ("cubic",       "results_cubic",       "Cubic",         "red"),
-    ("bbr",         "results_bbr",         "BBR",           "green"),
-    ("leocc_20000", "results_leocc_20000", "LeoCC (20000)", "blue"),
-    ("leocc_5000",  "results_leocc_5000",  "LeoCC (5000)",  "purple"),
+    ("cubic",  "results_cubic",  "Cubic",             "red"),
+    ("bbr",    "results_bbr",    "BBR",               "green"),
+    ("leocc",  "results_leocc",  "LeoCC (10000)",     "purple"),
 ]
 
 # ── HELPER FUNCTIONS ──────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ for trace_id in TRACES:
 # ── PLOT BOX PLOT ─────────────────────────────────────────────────────────────
 
 fig, ax = plt.subplots(figsize=(10, 8))
-ax.set_title("Average Throughput vs One-Way Delay — All 9 Uplink Traces",
+ax.set_title("Average Throughput vs One-Way Delay — All 9 Uplink Traces (Interpolation)",
              fontsize=12, fontweight='bold')
 
 legend_handles = []
@@ -158,11 +158,9 @@ for cca_key, _, label, color in CCAS:
     tputs  = [p[0] for p in points]
     delays = [p[1] for p in points]
 
-    # Percentiles
     t5,  t25, t50, t75, t95  = np.percentile(tputs,  [5, 25, 50, 75, 95])
     d5,  d25, d50, d75, d95  = np.percentile(delays, [5, 25, 50, 75, 95])
 
-    # Draw box (25th-75th percentile) with fill
     box = mpatches.FancyBboxPatch(
         (d25, t25), d75 - d25, t75 - t25,
         boxstyle="square,pad=0",
@@ -170,27 +168,21 @@ for cca_key, _, label, color in CCAS:
     )
     ax.add_patch(box)
 
-    # Horizontal whisker (delay 5th-95th) — dotted
     ax.plot([d5, d25], [t50, t50], color=color, lw=1.5, ls='--')
     ax.plot([d75, d95], [t50, t50], color=color, lw=1.5, ls='--')
-    # End caps
     ax.plot([d5,  d5],  [t50 - 0.8, t50 + 0.8], color=color, lw=1.5)
     ax.plot([d95, d95], [t50 - 0.8, t50 + 0.8], color=color, lw=1.5)
 
-    # Vertical whisker (throughput 5th-95th) — dotted
     ax.plot([d50, d50], [t5,  t25], color=color, lw=1.5, ls='--')
     ax.plot([d50, d50], [t75, t95], color=color, lw=1.5, ls='--')
-    # End caps
     ax.plot([d50 - 0.4, d50 + 0.4], [t5,  t5],  color=color, lw=1.5)
     ax.plot([d50 - 0.4, d50 + 0.4], [t95, t95], color=color, lw=1.5)
 
-    # Median intersection point
     ax.scatter([d50], [t50], color=color, s=80, zorder=6,
                marker='o', edgecolors='black', linewidth=1.0)
 
     legend_handles.append(mpatches.Patch(facecolor=color, edgecolor=color, alpha=0.5, label=label))
 
-# "Better" arrow — upper left direction
 ax.annotate('', xy=(0.12, 0.88), xytext=(0.22, 0.78),
             xycoords='axes fraction',
             arrowprops=dict(arrowstyle='->', color='red', lw=2.5))
@@ -205,7 +197,7 @@ ax.set_xlim(left=0)
 ax.set_ylim(bottom=0)
 
 plt.tight_layout()
-out_path = os.path.join(OUT, "scatter_box_uplink.png")
+out_path = os.path.join(OUT, "scatter_box_interpolation.png")
 plt.savefig(out_path, dpi=150, bbox_inches='tight')
 plt.close()
 print(f"\nSaved: {out_path}")
