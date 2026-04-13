@@ -1,144 +1,126 @@
 #!/usr/bin/env python3
 """
-parse_recorder_to_replayer_interpolation.py
-============================================
+parse_recorder_to_replayer.py
+==============================
 Convert LeoRecorder outputs to LeoReplayer trace format.
 
-This is the INTERPOLATION version — for comparison with carry forward version.
+This script converts raw pcap and ping data from the field trip recorder
+into the bandwidth and delay trace files used by LeoReplayer.
 
-Changes from carry forward version:
-    1. Empty slots → fill with very high delay value (3,600,000 ms = 1 hour)
-       instead of carry forward last known RTT value
-    2. Loss rate = 0 in run.sh 
-    3. min_rtt_fluctuation = 10000
+Delay parsing logic:
+    - Each ICMP sequence number maps directly to one line in delay file
+    - seq 1 → line 1, seq 2 → line 2, ..., seq N → line N
+    - No time-based slotting, no grouping
+    - Anchor time = sender timestamp of first ICMP response
+      (sender_timestamp = receive_timestamp - RTT)
+    - Missing seq numbers → fill with 121000 ms (longer than test duration,
+      effectively simulates complete packet loss)
 
-Reason for high fill value:
-    Carry forward slightly misinterprets RTT values during packet loss periods.
-    By filling with a very high value, packets sent during loss periods will
-    experience extremely high delay — effectively simulating packet loss without
-    needing mm-loss shell. This is closer to what actually happens during
-    reconfiguration-induced outages.
+Input:
+    - Trimmed ICMP ping log file (from trim_common_window.py)
+    - UDP pcap file (client side for downlink, server side for uplink)
 
-Original carry forward version: parse_recorder_to_replayer.py
+Output:
+    - bw_{trace_id}.txt  : Bandwidth trace (mahimahi packet timestamps)
+    - delay_{trace_id}.txt: Delay trace (one-way delay per sequence number)
+        
 """
 
 import argparse
-import math
 import os
 import re
 import subprocess
 from collections import defaultdict
 
 # ── DEFAULT CONFIG ─────────────────────────────────────────────────────────────
+# Mahimahi delay interval confirmed from run.sh: DELAY_INTERVAL=10
 DEFAULT_DELAY_INTERVAL_MS = 10
 
-# NEW: High fill value for empty slots = 1 hour in ms
-# This simulates packet loss by making packets experience extremely high delay
-HIGH_FILL_DELAY_MS = 3_600_000  # 1 hour = 3,600,000 ms
+# Fill value for missing ICMP sequence numbers
+# 121000ms > 120s test duration → effectively simulates complete packet loss
+MISSING_SEQ_DELAY_MS = 121000
 
-# OLD: Carry forward default (kept for reference)
-# DEFAULT_DELAY_MS = 200
-
+# Mbps represented by each line in bandwidth trace
 MBPS_PER_LINE = 12
 
 
 def parse_ping_to_delay(ping_file: str, output_file: str,
-                        delay_interval_ms: int = DEFAULT_DELAY_INTERVAL_MS,
-                        fill_delay_ms: int = HIGH_FILL_DELAY_MS) -> dict:
+                        delay_interval_ms: int = DEFAULT_DELAY_INTERVAL_MS) -> dict:
     """
     Convert ping RTT output to delay trace format.
 
     Slot assignment:
-        - Use math.floor() on receive timestamp to assign to 10ms slot
-        - RTT at 16ms → floor(16/10) = slot 1 (0-10ms)
-        - RTT at 22ms → floor(22/10) = slot 2 (10-20ms)
-        - Multiple pings in same slot → simple average
-
-    Empty slot handling:
-        - Fill with very high delay value (3,600,000 ms = 1 hour)
-        - This simulates packet loss without needing mm-loss shell
-        - Loss rate = 0 in run.sh when using this approach
-
-    OLD empty slot handling (carry forward — commented out):
-        # one_way_delay = delays[-1] if delays else DEFAULT_DELAY_MS
-        # This was Sizhe's suggestion — copy last known RTT value
-        # Valid since mm-loss shell handles actual packet loss
+        - Each ICMP sequence number maps directly to one line in the delay file
+        - seq 1 → line 1, seq 2 → line 2, ..., seq N → line N
+        - Anchor time is the sender timestamp of the first ICMP response:
+          sender_timestamp = receive_timestamp - RTT
+        - Missing sequence numbers are filled with 121000 ms
 
     Args:
         ping_file         : Path to trimmed ICMP ping log file
         output_file       : Path to output delay trace file
         delay_interval_ms : Mahimahi slot size in ms (default: 10)
-        fill_delay_ms     : Fill value for empty slots (default: 3,600,000 ms)
 
     Returns:
         dict with conversion statistics
     """
-    pattern = re.compile(r'\[(\d+\.\d+)\].*time=(\d+\.?\d*)\s*ms')
+    # Pattern matches: [1770506568.318547] ... icmp_seq=X ... time=Y ms
+    pattern = re.compile(r'\[(\d+\.\d+)\].*icmp_seq=(\d+).*time=(\d+\.?\d*)\s*ms')
 
-    rtt_samples = []
+    seq_data = {}  # seq_num → (receive_timestamp, rtt_ms)
 
     with open(ping_file, 'r') as f:
         for line in f:
             match = pattern.search(line)
             if match:
                 timestamp = float(match.group(1))
-                rtt_ms    = float(match.group(2))
-                rtt_samples.append((timestamp, rtt_ms))
+                seq_num   = int(match.group(2))
+                rtt_ms    = float(match.group(3))
+                seq_data[seq_num] = (timestamp, rtt_ms)
 
-    if not rtt_samples:
+    if not seq_data:
         raise ValueError(f"No valid ping samples found in {ping_file}")
 
-    start_time  = rtt_samples[0][0]
-    end_time    = rtt_samples[-1][0]
-    duration_ms = int((end_time - start_time) * 1000)
+    min_seq = min(seq_data.keys())
+    max_seq = max(seq_data.keys())
 
-    interval_rtts = defaultdict(list)
-    for timestamp, rtt_ms in rtt_samples:
-        interval_idx = math.floor((timestamp - start_time) * 1000 / delay_interval_ms)
-        interval_rtts[interval_idx].append(rtt_ms)
+    # Anchor: sender timestamp of first received ICMP response
+    first_recv_ts, first_rtt = seq_data[min_seq]
+    anchor_time = first_recv_ts - (first_rtt / 1000.0)
 
-    num_intervals = duration_ms // delay_interval_ms + 1
+    print(f"  First seq     : {min_seq}")
+    print(f"  Last seq      : {max_seq}")
+    print(f"  Anchor time   : {anchor_time:.6f} (sender timestamp)")
 
+    # Build delay list: min_seq → line 1, min_seq+1 → line 2, ..., min_seq+11999 → line 12000
+    # Missing seqs (gaps in middle, after last ping) → 121000ms
+    TOTAL_SEQS = 12000
     delays = []
-    empty_slots = 0
-    real_slots  = 0
-
-    for i in range(num_intervals):
-        if i in interval_rtts:
-            # Real ping data — average and divide by 2 for one-way delay
-            avg_rtt       = sum(interval_rtts[i]) / len(interval_rtts[i])
-            one_way_delay = int(round(avg_rtt / 2))
-            real_slots += 1
+    missing_count = 0
+    for seq in range(min_seq, min_seq + TOTAL_SEQS):
+        if seq in seq_data:
+            _, rtt_ms = seq_data[seq]
+            one_way_delay = int(round(rtt_ms / 2))
         else:
-            # NEW: Empty slot — fill with very high delay value
-            # This simulates packet loss — packets in these slots will
-            # experience 1 hour delay effectively never arriving
-            one_way_delay = fill_delay_ms
-            empty_slots  += 1
-
-            # OLD: Carry forward last known RTT value 
-            # one_way_delay = delays[-1] if delays else 200
-            # mm-loss shell handles actual packet loss simulation
-
+            one_way_delay = MISSING_SEQ_DELAY_MS
+            missing_count += 1
         delays.append(one_way_delay)
 
+    # Write output — one integer per line
     with open(output_file, 'w') as f:
         for delay in delays:
             f.write(f"{delay}\n")
 
-    # Compute stats excluding high fill values for meaningful averages
-    real_delays = [d for d in delays if d < fill_delay_ms]
-
     stats = {
-        'ping_samples'  : len(rtt_samples),
-        'duration_sec'  : round(end_time - start_time, 2),
-        'intervals'     : len(delays),
-        'real_slots'    : real_slots,
-        'empty_slots'   : empty_slots,
-        'avg_delay_ms'  : round(sum(real_delays) / len(real_delays), 2) if real_delays else 0,
-        'min_delay_ms'  : min(real_delays) if real_delays else 0,
-        'max_delay_ms'  : max(real_delays) if real_delays else 0,
-        'fill_value_ms' : fill_delay_ms,
+        'ping_samples' : len(seq_data),
+        'min_seq'      : min_seq,
+        'max_seq'      : max_seq,
+        'total_lines'  : len(delays),
+        'missing_seqs' : missing_count,
+        'avg_delay_ms' : round(sum(d for d in delays if d < MISSING_SEQ_DELAY_MS) / max(1, len(seq_data)), 2),
+        'min_delay_ms' : min(d for d in delays if d < MISSING_SEQ_DELAY_MS),
+        'max_delay_ms' : max(d for d in delays if d < MISSING_SEQ_DELAY_MS),
+        'anchor_time'  : anchor_time,
     }
     return stats
 
@@ -147,7 +129,20 @@ def parse_pcap_to_bandwidth(pcap_file: str, output_file: str,
                              mbps_per_line: int = MBPS_PER_LINE) -> dict:
     """
     Convert pcap file to mahimahi bandwidth trace format.
-    UNCHANGED from original version.
+
+    Each line in the output = one delivery opportunity of ~12 Mbps.
+    Multiple lines with same timestamp = higher bandwidth at that moment.
+
+    Uses tcpdump to parse pcap. Only counts incoming packets (In direction)
+    since we measure received bandwidth at receiver side.
+
+    Args:
+        pcap_file    : Path to pcap file (client for downlink, server for uplink)
+        output_file  : Path to output bandwidth trace file
+        mbps_per_line: Mbps per bandwidth trace line (default: 12)
+
+    Returns:
+        dict with conversion statistics
     """
     cmd = ['tcpdump', '-tt', '-n', '-r', pcap_file]
     try:
@@ -209,16 +204,21 @@ def parse_pcap_to_bandwidth(pcap_file: str, output_file: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Convert LeoRecorder outputs to LeoReplayer trace format (interpolation version)',
+        description='Convert LeoRecorder outputs to LeoReplayer trace format',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument('--ping_file',   required=True)
-    parser.add_argument('--pcap_file',   required=True)
-    parser.add_argument('--output_dir',  default='./output')
-    parser.add_argument('--trace_id',    type=int, default=1)
-    parser.add_argument('--delay_interval', type=int, default=DEFAULT_DELAY_INTERVAL_MS)
-    parser.add_argument('--fill_delay_ms',  type=int, default=HIGH_FILL_DELAY_MS,
-                        help=f'Fill value for empty slots in ms (default: {HIGH_FILL_DELAY_MS})')
-    parser.add_argument('--mbps_per_line',  type=int, default=MBPS_PER_LINE)
+    parser.add_argument('--ping_file',  required=True,
+                        help='Path to trimmed ICMP ping log file')
+    parser.add_argument('--pcap_file',  required=True,
+                        help='Path to pcap file (client for DL, server for UL)')
+    parser.add_argument('--output_dir', default='./output',
+                        help='Output directory for trace files (default: ./output)')
+    parser.add_argument('--trace_id',   type=int, default=1,
+                        help='Trace ID for output filenames (default: 1)')
+    parser.add_argument('--delay_interval', type=int, default=DEFAULT_DELAY_INTERVAL_MS,
+                        help=f'Delay trace interval in ms (default: {DEFAULT_DELAY_INTERVAL_MS})')
+    parser.add_argument('--mbps_per_line',  type=int, default=MBPS_PER_LINE,
+                        help=f'Mbps per bandwidth trace line (default: {MBPS_PER_LINE})')
 
     args = parser.parse_args()
 
@@ -227,26 +227,25 @@ def main():
     delay_file = os.path.join(args.output_dir, f"delay_{args.trace_id}.txt")
     bw_file    = os.path.join(args.output_dir, f"bw_{args.trace_id}.txt")
 
-    print(f"Converting recorder outputs to replayer format (INTERPOLATION version)...")
-    print(f"  Ping file      : {args.ping_file}")
-    print(f"  PCAP file      : {args.pcap_file}")
-    print(f"  Output dir     : {args.output_dir}")
-    print(f"  Fill delay     : {args.fill_delay_ms} ms (for empty slots)")
+    print(f"Converting recorder outputs to replayer format...")
+    print(f"  Ping file : {args.ping_file}")
+    print(f"  PCAP file : {args.pcap_file}")
+    print(f"  Output dir: {args.output_dir}")
     print()
 
+    # Convert delay trace
     print("Processing delay trace...")
     try:
         delay_stats = parse_ping_to_delay(
-            args.ping_file, delay_file,
-            args.delay_interval, args.fill_delay_ms
+            args.ping_file, delay_file, args.delay_interval
         )
         print(f"  Ping samples  : {delay_stats['ping_samples']}")
-        print(f"  Duration      : {delay_stats['duration_sec']} sec")
-        print(f"  Intervals     : {delay_stats['intervals']}")
-        print(f"  Real slots    : {delay_stats['real_slots']}")
-        print(f"  Empty slots   : {delay_stats['empty_slots']} (filled with {delay_stats['fill_value_ms']} ms)")
-        print(f"  Delay range   : {delay_stats['min_delay_ms']}-{delay_stats['max_delay_ms']} ms (excluding fill)")
-        print(f"  Average delay : {delay_stats['avg_delay_ms']} ms (excluding fill)")
+        print(f"  Seq range     : {delay_stats['min_seq']} - {delay_stats['max_seq']}")
+        print(f"  Total lines   : {delay_stats['total_lines']}")
+        print(f"  Missing seqs  : {delay_stats['missing_seqs']}")
+        print(f"  Delay range   : {delay_stats['min_delay_ms']}-{delay_stats['max_delay_ms']} ms")
+        print(f"  Average delay : {delay_stats['avg_delay_ms']} ms")
+        print(f"  Anchor time   : {delay_stats['anchor_time']:.6f}")
         print(f"  Output        : {delay_file}")
     except Exception as e:
         print(f"  ERROR: {e}")
@@ -254,6 +253,7 @@ def main():
 
     print()
 
+    # Convert bandwidth trace
     print("Processing bandwidth trace...")
     try:
         bw_stats = parse_pcap_to_bandwidth(
