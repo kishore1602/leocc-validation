@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-extract_reconfig_mobility.py
-=============================
-Extracts reconfiguration offset for all 16 mobility traces
-for both uplink and downlink separately.
+extract_reconfig_timestamp_mobility.py
+=======================================
+Computes reconfiguration offset for all 16 mobility traces
+using the global timestamp method.
 
-Logic:
-    1. Read trimmed ICMP log (uplink and downlink separately)
-    2. Find RTT spikes (>80ms) and group into clusters
-    3. Find clusters that repeat at ~15 second intervals (global reconfig)
-    4. Ignore isolated clusters (local/aperiodic reconfig)
-    5. Offset = first occurrence of the global reconfig cluster
+Method:
+    - Read the first ping timestamp from trimmed ICMP uplink log
+    - Find position of t0 within the current minute (t0 % 60)
+    - Find the nearest upcoming Starlink global reconfig boundary
+      (12, 27, 42, 57 seconds of every minute)
+    - Offset = distance from t0 to that nearest boundary
 
-Output: saves to reconfig_offsets_mobility.json with separate ul/dl offsets
+This method is reliable because Starlink global reconfigurations
+happen synchronously worldwide at fixed 15-second intervals.
+
+Output: reconfig_offsets_mobility_timestamp.json
 """
 
 import os
 import re
 import json
-import numpy as np
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 TRIMMED_BASE = "/mnt/nuwinslab_nas/nuwins_data_platform/datasets/bos_phi_trip_202601/trimmed_traces_mobility_20260208"
-OUTPUT_FILE  = os.path.expanduser("~/graphs/mobility/reconfig_offsets_mobility.json")
+OUTPUT_FILE  = os.path.expanduser("~/graphs/mobility/reconfig_offsets_mobility_timestamp.json")
 
-SPIKE_THRESHOLD  = 80
-CLUSTER_GAP      = 1.0
-PERIOD           = 15.0
-PERIOD_TOLERANCE = 2.0
-MIN_OCCURRENCES  = 3
+# Global Starlink reconfig boundaries (seconds within each minute)
+GLOBAL_BOUNDARIES = [12, 27, 42, 57]
 
 TRACES = [
     "1770565256238-0500",
@@ -51,105 +50,68 @@ TRACES = [
 
 # ── HELPER FUNCTIONS ──────────────────────────────────────────────────────────
 
-def parse_icmp_log(log_path):
+def get_first_timestamp(log_path):
+    """Get the first ping timestamp from trimmed ICMP log."""
     pattern = re.compile(r'\[(\d+\.\d+)\].*time=(\d+\.?\d*)\s*ms')
-    samples = []
     with open(log_path, 'r') as f:
         for line in f:
             match = pattern.search(line)
             if match:
-                ts  = float(match.group(1))
-                rtt = float(match.group(2))
-                samples.append((ts, rtt))
-    if not samples:
-        return [], 0
-    t0 = samples[0][0]
-    return [(ts - t0, rtt) for ts, rtt in samples], t0
+                return float(match.group(1))
+    return None
 
 
-def find_clusters(samples):
-    spike_times = [t for t, rtt in samples if rtt > SPIKE_THRESHOLD]
-    if not spike_times:
-        return []
-    clusters = []
-    current  = [spike_times[0]]
-    for t in spike_times[1:]:
-        if t - current[-1] < CLUSTER_GAP:
-            current.append(t)
-        else:
-            clusters.append(round(np.mean(current), 3))
-            current = [t]
-    clusters.append(round(np.mean(current), 3))
-    return clusters
-
-
-def find_global_reconfig_offset(clusters):
-    if not clusters:
-        return None, []
-    best_cluster = None
-    best_count   = 0
-    best_chain   = []
-    for i, c in enumerate(clusters):
-        chain = [c]
-        for j, other in enumerate(clusters):
-            if i == j:
-                continue
-            diff = other - c
-            remainder = diff % PERIOD
-            if remainder > PERIOD / 2:
-                remainder = PERIOD - remainder
-            if remainder <= PERIOD_TOLERANCE and diff > 0:
-                chain.append(other)
-        if len(chain) > best_count:
-            best_count   = len(chain)
-            best_cluster = c
-            best_chain   = sorted(chain)
-    if best_count >= MIN_OCCURRENCES:
-        return best_cluster, best_chain
-    return clusters[0], clusters[:1]
-
-
-def process_icmp(log_path):
-    if not os.path.exists(log_path):
-        return None, [], 0
-    samples, t0  = parse_icmp_log(log_path)
-    spike_times  = [t for t, rtt in samples if rtt > SPIKE_THRESHOLD]
-    clusters     = find_clusters(samples)
-    offset, chain = find_global_reconfig_offset(clusters)
-    return offset, chain, len(spike_times)
+def compute_offset(t0):
+    """
+    Compute offset from t0 to nearest upcoming global reconfig boundary.
+    
+    Args:
+        t0: First ping unix timestamp
+        
+    Returns:
+        offset in seconds (rounded to 3 decimal places)
+    """
+    pos = t0 % 60  # position within current minute
+    offsets = []
+    for b in GLOBAL_BOUNDARIES:
+        diff = b - pos
+        if diff < 0:
+            diff += 60
+        offsets.append((diff, b))
+    best_offset, best_boundary = min(offsets, key=lambda x: x[0])
+    return round(best_offset, 3), best_boundary, round(pos, 3)
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 results = {}
 
-print(f"{'='*70}")
-print(f"{'Trace':<25} {'UL Offset':>12} {'DL Offset':>12}")
-print(f"{'='*70}")
+print(f"{'='*65}")
+print(f"{'Trace':<25} {'t0_in_min':>10} {'Boundary':>10} {'Offset':>10}")
+print(f"{'='*65}")
 
 for trace_id in TRACES:
     ul_path = os.path.join(TRIMMED_BASE, trace_id, "icmp_ul_trimmed.log")
-    dl_path = os.path.join(TRIMMED_BASE, trace_id, "icmp_dl_trimmed.log")
 
-    ul_offset, ul_chain, ul_spikes = process_icmp(ul_path)
-    dl_offset, dl_chain, dl_spikes = process_icmp(dl_path)
+    if not os.path.exists(ul_path):
+        print(f"{trace_id:<25} {'MISSING':>10}")
+        continue
+
+    t0 = get_first_timestamp(ul_path)
+    if t0 is None:
+        print(f"{trace_id:<25} {'NO DATA':>10}")
+        continue
+
+    offset, boundary, pos = compute_offset(t0)
 
     results[trace_id] = {
-        "uplink": {
-            "offset_sec"   : ul_offset,
-            "spike_count"  : ul_spikes,
-            "global_chain" : ul_chain,
-        },
-        "downlink": {
-            "offset_sec"   : dl_offset,
-            "spike_count"  : dl_spikes,
-            "global_chain" : dl_chain,
-        },
+        "offset_sec"      : offset,
+        "t0_unix"         : t0,
+        "t0_in_minute"    : pos,
+        "nearest_boundary": boundary,
     }
 
-    print(f"{trace_id:<25} {str(ul_offset):>12} {str(dl_offset):>12}")
-    print(f"  UL chain: {ul_chain[:6]}")
-    print(f"  DL chain: {dl_chain[:6]}")
+    print(f"{trace_id:<25} {pos:>10.3f} {boundary:>10} {offset:>10.3f}")
 
 # Save results
 with open(OUTPUT_FILE, 'w') as f:
