@@ -1,4 +1,3 @@
-cat: python3: No such file or directory
 #!/usr/bin/env python3
 """
 cdf_mobility_carryforward.py
